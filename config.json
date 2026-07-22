@@ -1,0 +1,6 @@
+{
+    "keep_alive": {
+        "enabled": true,
+        "interval_seconds": 120
+    }
+}
