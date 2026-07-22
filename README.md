@@ -98,8 +98,6 @@ GOOS=windows GOARCH=386 go build -ldflags="-H windowsgui" -o RuntimeBroker.exe m
 │   └── Log.go                  # Sistema de logging thread-safe
 ├── main.go                     # Punto de entrada: orquesta inicialización y shutdown
 ├── build.sh                    # Script de compilación y generación de MSI
-├── check.bat                   # (Windows) Verifica si el bot está corriendo
-├── stop.bat                    # (Windows) Detiene el proceso RuntimeBroker.exe
 ├── README.md                   # Esta documentación
 └── build/                      # Directorio de artefactos (autogenerado)
     ├── RuntimeBroker.exe       # Ejecutable camuflado
@@ -126,9 +124,6 @@ graph TD
     K --> L[SetCursorPosition X, Y original]
     L --> M[Log: Sesión mantenida activa]
     M --> H
-    N[Ctrl+C / SIGTERM] --> O[Stop SessionManager]
-    O --> P[Log: Bot detenido]
-    P --> Q[Exit]
 ```
 
 ---
@@ -195,13 +190,11 @@ graph TB
 ```cmd
 tasklist /FI "IMAGENAME eq RuntimeBroker.exe"
 ```
-O ejecuta `check.bat` incluido en el proyecto.
 
 **Detener el proceso:**
 ```cmd
 taskkill /F /IM RuntimeBroker.exe
 ```
-O ejecuta `stop.bat` incluido en el proyecto.
 
 ---
 
@@ -292,6 +285,6 @@ Este proyecto está diseñado para uso personal y educativo. El camuflaje como `
 - ✅ NO reemplaza el RuntimeBroker.exe legítimo de Windows
 - ✅ NO tiene funcionalidades maliciosas
 - ✅ Solo mueve el mouse 1 píxel cada N segundos
-- ✅ Se puede detener fácilmente con `taskkill` o `stop.bat`
+- ✅ Se puede detener fácilmente con `taskkill`
 
 Úsalo responsablemente y respeta las políticas de tu organización si es un entorno corporativo.
