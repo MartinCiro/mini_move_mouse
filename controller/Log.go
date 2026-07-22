@@ -27,20 +27,29 @@ type Log struct {
 // NewLog crea una nueva instancia de Log.
 // Si basePath está vacío, usa el directorio temporal del sistema (%TEMP%).
 func NewLog(basePath string) *Log {
-	// Fallback a %TEMP% si no se proporciona ruta
 	if basePath == "" {
 		basePath = os.TempDir()
 	}
 
 	fechaActual := time.Now().Format("2006-01-02")
-
 	rutaProcesos := filepath.Join(basePath, "logs", "procesos")
 	rutaErrores := filepath.Join(basePath, "logs", "errores")
 
-	// Crear directorios si no existen (ignora error si ya existen o no hay permisos,
-	// el error se capturará al escribir)
-	_ = os.MkdirAll(rutaProcesos, 0755)
-	_ = os.MkdirAll(rutaErrores, 0755)
+	// 1. Intentar crear en la ruta solicitada (%TEMP%)
+	errProc := os.MkdirAll(rutaProcesos, 0755)
+	errErr := os.MkdirAll(rutaErrores, 0755)
+
+	// 2. FALLBACK: Si falla (por permisos o ruta inválida), usar la carpeta del ejecutable
+	if errProc != nil || errErr != nil {
+		exeDir, _ := os.Executable()
+		basePath = filepath.Dir(exeDir)
+		rutaProcesos = filepath.Join(basePath, "logs", "procesos")
+		rutaErrores = filepath.Join(basePath, "logs", "errores")
+
+		// Intentar de nuevo en la carpeta del ejecutable
+		_ = os.MkdirAll(rutaProcesos, 0755)
+		_ = os.MkdirAll(rutaErrores, 0755)
+	}
 
 	archivoProcesos := filepath.Join(rutaProcesos, fmt.Sprintf("LogProcesos_%s.txt", fechaActual))
 	archivoErrores := filepath.Join(rutaErrores, fmt.Sprintf("LogErrores_%s.txt", fechaActual))
@@ -53,9 +62,7 @@ func NewLog(basePath string) *Log {
 		archivoErrores:  archivoErrores,
 	}
 
-	// Bonus: Iniciar limpieza de logs antiguos en segundo plano
 	go l.cleanupOldLogs()
-
 	return l
 }
 
