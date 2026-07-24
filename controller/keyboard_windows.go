@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	VK_NUMPAD5      = 0x65
+	VK_F13          = 0x7C
 	KEYEVENTF_KEYUP = 0x0002
 )
 
@@ -47,7 +47,7 @@ func SimulateKeyPress(vkCode uint16) error {
 
 // SimulateNumpad5KeyPress simula específicamente la tecla "5" del teclado numérico
 func SimulateNumpad5KeyPress() error {
-	return SimulateKeyPress(VK_NUMPAD5)
+	return SimulateKeyPress(VK_F13)
 }
 
 // GetTickCount retorna el tiempo en milisegundos desde que se inició Windows

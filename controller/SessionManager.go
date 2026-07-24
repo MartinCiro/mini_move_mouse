@@ -83,7 +83,7 @@ func (sm *SessionManager) performKeyPress() {
 		return
 	}
 
-	sm.config.Log.Comentario("SUCCESS", fmt.Sprintf("✅ Tecla NumPad5 presionada - Sesión activa (usuario inactivo hace %ds)", idleTimeSec))
+	sm.config.Log.Comentario("SUCCESS", fmt.Sprintf("✅ Tecla presionada - Sesión activa (usuario inactivo hace %ds)", idleTimeSec))
 }
 
 func (sm *SessionManager) WaitForShutdown() {
