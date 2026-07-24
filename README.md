@@ -213,7 +213,7 @@ El bot genera logs automáticamente en la ubicación configurada:
 ========================================================================================================================
 | INICIO DE EJECUCIÓN - KeepAliveBot - 2026-07-23 15:30:00                                                           |
 ========================================================================================================================
-| INFO: Keep-Alive iniciado. Intervalo: 60 segundos                                                                   |
+| INFO: Iniciado. Intervalo: 60 segundos                                                                   |
 | Hora: 2026-07-23 15:30:00                                                                                           |
 ========================================================================================================================
 | SUCCESS: Mouse movido y regresado a posición original                                                               |

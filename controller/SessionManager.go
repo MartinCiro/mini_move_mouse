@@ -21,12 +21,11 @@ func NewSessionManager(config *Config) *SessionManager {
 	}
 }
 
-// Start inicia el bucle de mantenimiento de sesión en segundo plano
 func (sm *SessionManager) Start() {
 	kaConfig := sm.config.GetKeepAliveConfig()
 
 	if !kaConfig.Enabled {
-		sm.config.Log.Comentario("INFO", "🚫 Keep-Alive deshabilitado en la configuración.")
+		sm.config.Log.Comentario("INFO", "🚫 Deshabilitado en la configuración.")
 		return
 	}
 
@@ -34,52 +33,59 @@ func (sm *SessionManager) Start() {
 	interval := time.Duration(kaConfig.Interval) * time.Second
 	ticker := time.NewTicker(interval)
 
-	sm.config.Log.Comentario("INFO", fmt.Sprintf("🖱️  Keep-Alive iniciado. Movimiento cada %d segundos.", kaConfig.Interval))
+	sm.config.Log.Comentario("INFO", fmt.Sprintf("⌨️  Iniciado. Intervalo: %ds, Umbral de inactividad: %ds",
+		kaConfig.Interval, kaConfig.IdleThreshold))
 
-	// Goroutine para manejar el bucle
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				sm.performMicroMovement()
+				sm.performKeyPress()
 			case <-sm.stopChan:
 				ticker.Stop()
 				sm.isRunning = false
-				sm.config.Log.Comentario("INFO", "🛑 Keep-Alive detenido.")
+				sm.config.Log.Comentario("INFO", "🛑 Detenido.")
 				return
 			}
 		}
 	}()
 }
 
-// Stop detiene el bucle de forma segura
 func (sm *SessionManager) Stop() {
 	if sm.isRunning {
 		sm.stopChan <- struct{}{}
 	}
 }
 
-// performMicroMovement ejecuta la lógica de mover y regresar el mouse
-func (sm *SessionManager) performMicroMovement() {
-	pos, err := GetCursorPosition()
+func (sm *SessionManager) performKeyPress() {
+	kaConfig := sm.config.GetKeepAliveConfig()
+
+	// 1. Verificar tiempo de inactividad del usuario
+	idleTimeMs, err := GetIdleTime()
 	if err != nil {
-		sm.config.Log.Comentario("WARNING", fmt.Sprintf("⚠️ No se pudo obtener la posición del mouse: %v", err))
+		sm.config.Log.Comentario("WARNING", fmt.Sprintf("⚠️ No se pudo obtener tiempo de inactividad: %v", err))
 		return
 	}
 
-	// 1. Mover 1 pixel (derecha y abajo)
-	_ = SetCursorPosition(pos.X+1, pos.Y+1)
+	idleTimeSec := idleTimeMs / 1000
+	threshold := uint32(kaConfig.IdleThreshold)
 
-	// 2. Pausa mínima para que el SO registre el evento
-	time.Sleep(10 * time.Millisecond)
+	// 2. Si el usuario ha estado activo hace menos de 30 segundos, NO presionar la tecla
+	if idleTimeSec < threshold {
+		sm.config.Log.Comentario("INFO", fmt.Sprintf("⏸️  Usuario activo (inactivo hace %ds). Pausando bot.", idleTimeSec))
+		return
+	}
 
-	// 3. Regresar a la posición original
-	_ = SetCursorPosition(pos.X, pos.Y)
+	// 3. Usuario inactivo: presionar la tecla
+	err = SimulateNumpad5KeyPress()
+	if err != nil {
+		sm.config.Log.Comentario("WARNING", fmt.Sprintf("⚠️ No se pudo simular tecla: %v", err))
+		return
+	}
 
-	sm.config.Log.Comentario("SUCCESS", "✅ Sesión mantenida activa")
+	sm.config.Log.Comentario("SUCCESS", fmt.Sprintf("✅ Tecla NumPad5 presionada - Sesión activa (usuario inactivo hace %ds)", idleTimeSec))
 }
 
-// WaitForShutdown bloquea la ejecución principal hasta recibir una señal de cierre
 func (sm *SessionManager) WaitForShutdown() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

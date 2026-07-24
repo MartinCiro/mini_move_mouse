@@ -9,8 +9,9 @@ import (
 )
 
 type KeepAliveConfig struct {
-	Enabled  bool `json:"enabled"`
-	Interval int  `json:"interval_seconds"`
+	Enabled       bool `json:"enabled"`
+	Interval      int  `json:"interval_seconds"`
+	IdleThreshold int  `json:"idle_threshold_seconds"` // Tiempo de inactividad antes de activarse
 }
 
 type ConfigData struct {
@@ -48,8 +49,9 @@ func (c *Config) loadConfigJSON() {
 	// Valores por defecto
 	c.configData = &ConfigData{
 		KeepAlive: KeepAliveConfig{
-			Enabled:  true,
-			Interval: 60,
+			Enabled:       true,
+			Interval:      60,
+			IdleThreshold: 30, // 30 segundos por defecto
 		},
 		LogPath: "",
 	}
@@ -60,7 +62,6 @@ func (c *Config) loadConfigJSON() {
 	}
 
 	if err := json.Unmarshal(data, c.configData); err != nil {
-		// Silencioso: usar valores por defecto
 		return
 	}
 }
@@ -138,10 +139,7 @@ func (c *Config) getLogBaseDir() string {
 	defer c.configMu.Unlock()
 
 	if c.configData != nil && c.configData.LogPath != "" {
-		// Expandir variables de entorno como %TEMP%
 		expandedPath := os.ExpandEnv(c.configData.LogPath)
-
-		// Si es relativa, hacerla absoluta
 		if !filepath.IsAbs(expandedPath) {
 			if absPath, err := filepath.Abs(expandedPath); err == nil {
 				expandedPath = absPath
@@ -150,6 +148,5 @@ func (c *Config) getLogBaseDir() string {
 		return expandedPath
 	}
 
-	// Fallback por defecto: Directorio temporal del sistema (%TEMP%)
 	return os.TempDir()
 }
