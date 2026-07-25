@@ -1,6 +1,8 @@
 # 🛡️ KeepAlive Bot: Anti-Bloqueo de Sesión para Windows
 
-Este proyecto es una herramienta de mantenimiento de sesión escrita en Go que previene el bloqueo automático de Windows mediante movimientos imperceptibles del mouse. El ejecutable se camufla como `RuntimeBroker.exe` (proceso legítimo de Windows) y opera en segundo plano sin consola visible.
+Este proyecto es una herramienta de mantenimiento de sesión escrita en Go que previene el bloqueo automático de Windows. En lugar de mover el mouse, simula la presión de una **tecla fantasma (F13)**, la cual es completamente invisible para el usuario y las aplicaciones, pero suficiente para resetear el temporizador de inactividad del sistema.
+
+Además, cuenta con un **sistema de control de acceso híbrido** basado en Google Sheets, que verifica la identidad real del usuario (vía OAuth 2.0) y valida sus permisos de forma privada (vía Service Account), garantizando que solo el personal autorizado pueda ejecutar el bot.
 
 ---
 
@@ -10,42 +12,52 @@ Este proyecto es una herramienta de mantenimiento de sesión escrita en Go que p
 ```bash
 go mod init mouse-mov
 go get golang.org/x/sys/windows
+go get golang.org/x/oauth2
+go get golang.org/x/oauth2/google
+go get google.golang.org/api/sheets/v4
+go get google.golang.org/api/option
 ```
 
-### 2. Instalación de wixl (para generar MSI)
+### 2. Instalación de wixl (para generar MSI en Linux)
 ```bash
 # En Ubuntu/Debian/Lubuntu
 sudo apt update
 sudo apt install msitools wixl uuidgen
 ```
 
-### 3. Configuración del Bot (`config.json`)
-Crea un archivo `config.json` en la raíz del proyecto (opcional, usa valores por defecto si no existe):
+### 3. Configuración del Administrador (Google Cloud)
+*Este paso solo lo realiza el administrador una sola vez.*
+
+1. Crea un proyecto en [Google Cloud Console](https://console.cloud.google.com/).
+2. Habilita la **Google Sheets API**.
+3. Ve a **Credenciales** > **Crear credenciales** > **ID de cliente de OAuth** (Tipo: Aplicación de escritorio). Descarga el JSON.
+4. Ve a **Cuentas de servicio** > **Crear cuenta de servicio**. Genera una clave JSON y descárgala.
+5. **⚠️ PASO CRÍTICO**: Abre tu hoja de cálculo de Google Sheets, haz clic en **Compartir** y agrega el correo de la cuenta de servicio (ej: `nombre@proyecto.iam.gserviceaccount.com`) con permiso de **Lector**.
+6. Copia el contenido de ambos archivos JSON y pégalos en las constantes de `controller/credentials.go` y `controller/service.go` respectivamente.
+
+### 4. Configuración del Bot (`config.json`)
+Crea un archivo `config.json` en la raíz del proyecto. Gracias a los valores por defecto hardcodeados, este archivo puede ser mínimo:
 
 ```json
 {
     "keep_alive": {
         "enabled": true,
-        "interval_seconds": 60
+        "interval_seconds": 60,
+        "idle_threshold_seconds": 30
     },
     "log_path": "%TEMP%\\RuntimeBrokerLogs"
 }
 ```
+*(Opcional: Puedes agregar un bloque `"auth": { "spreadsheet_id": "TU_ID", "required_permission": "ejecuta:mm" }` si necesitas sobrescribir los valores por defecto del administrador).*
 
-**Parámetros:**
-- `enabled`: Activa/desactiva el bot (default: `true`)
-- `interval_seconds`: Tiempo entre movimientos del mouse (default: `60`)
-- `log_path`: Ruta personalizada para logs (default: `%TEMP%`, soporta variables de entorno)
-
-### 4. Ejecutar el Proyecto
+### 5. Ejecutar el Proyecto
 
 ```bash
-# Desarrollo (con consola visible)
+# Desarrollo (con consola visible para ver el flujo de OAuth la primera vez)
 go run main.go
 
-# Producción (sin consola)
+# Producción (sin consola, camuflado)
 GOOS=windows GOARCH=amd64 go build -ldflags="-H windowsgui" -o RuntimeBroker.exe main.go
-./RuntimeBroker.exe
 ```
 
 ---
@@ -53,35 +65,23 @@ GOOS=windows GOARCH=amd64 go build -ldflags="-H windowsgui" -o RuntimeBroker.exe
 ## 🛠️ Procesos de Compilación
 
 ### Script de Build Automatizado
-El proyecto incluye `build.sh` que compila el ejecutable y genera el instalador MSI:
+El proyecto incluye `build.sh`, que compila el ejecutable, gestiona la limpieza y genera el instalador MSI:
 
 ```bash
-# Dar permisos (primera vez)
+# Dar permisos de ejecución (primera vez)
 chmod +x build.sh
 
-# Compilar todo
+# Compilar todo (EXE + MSI)
 ./build.sh
 
-# Limpiar build
+# Limpiar directorio de build
 ./build.sh clean
 ```
 
-**El script genera:**
-- `build/RuntimeBroker.exe` - Ejecutable portable
-- `build/RuntimeBroker.msi` - Instalador con acceso directo
-- `build/runtime.wxs` - Archivo WiX (intermedio)
-
-### Compilación Manual Multiplataforma
-```bash
-# Windows x86_64 (con consola)
-GOOS=windows GOARCH=amd64 go build -o RuntimeBroker.exe main.go
-
-# Windows x86_64 (sin consola - producción)
-GOOS=windows GOARCH=amd64 go build -ldflags="-H windowsgui" -o RuntimeBroker.exe main.go
-
-# Windows x86 (32 bits)
-GOOS=windows GOARCH=386 go build -ldflags="-H windowsgui" -o RuntimeBroker.exe main.go
-```
+**El script genera en la carpeta `build/`:**
+- `RuntimeBroker.exe` - Ejecutable portable camuflado.
+- `RuntimeBroker.msi` - Instalador con acceso directo en el Menú Inicio.
+- `runtime.wxs` - Archivo fuente de WiX (intermedio).
 
 ---
 
@@ -89,20 +89,26 @@ GOOS=windows GOARCH=386 go build -ldflags="-H windowsgui" -o RuntimeBroker.exe m
 
 ```text
 .
-├── config.json                 # Configuración del bot (intervalo, logs, habilitado)
+├── config.json                 # Configuración del bot (opcional, usa defaults)
 ├── controller/                 # Lógica de negocio central
-│   ├── Config.go               # Configuración central con fallback a %TEMP%
-│   ├── SessionManager.go       # 🔄 Gestor del ciclo de vida del bot
-│   ├── cursor_windows.go       # 🖱️ API nativa de Windows (user32.dll)
-│   ├── cursor_other.go         # 🐧 Stub para Linux/macOS (solo compila en no-Windows)
-│   └── Log.go                  # Sistema de logging thread-safe
-├── main.go                     # Punto de entrada: orquesta inicialización y shutdown
+│   ├── Config.go               # Carga de configuración con fallback inteligente
+│   ├── GoogleAuth.go           # 🔐 Flujo híbrido: OAuth (identidad) + Service Account (permisos)
+│   ├── InstanceLock.go         # 🔒 Mutex y gestión de PID para instancia única (Windows)
+│   ├── Log.go                  # Sistema de logging thread-safe con limpieza automática (7 días)
+│   ├── SessionManager.go       # 🔄 Gestor del ciclo de vida y temporizador del bot
+│   ├── credentials.go          # 📄 Contenido de credentials.json embebido en el binario
+│   ├── service.go              # 📄 Contenido de service-account.json embebido en el binario
+│   ├── dlls_windows.go         # ⚙️ Centralización de llamadas a user32.dll y kernel32.dll
+│   ├── keyboard_windows.go     # ⌨️ Simulación de tecla fantasma (F13) y detección de inactividad
+│   ├── instance_other.go       # 🐧 Stub para Linux/macOS (instancia única)
+│   └── keyboard_other.go       # 🐧 Stub para Linux/macOS (simulación de teclas)
+├── main.go                     # Punto de entrada: orquesta inicialización, lock y shutdown
 ├── build.sh                    # Script de compilación y generación de MSI
 ├── README.md                   # Esta documentación
-└── build/                      # Directorio de artefactos (autogenerado)
-    ├── RuntimeBroker.exe       # Ejecutable camuflado
-    ├── RuntimeBroker.msi       # Instalador
-    └── runtime.wxs             # Archivo WiX
+└── build/                      # Directorio de artefactos (autogenerado, ignorado en Git)
+    ├── RuntimeBroker.exe       
+    ├── RuntimeBroker.msi       
+    └── runtime.wxs             
 ```
 
 ---
@@ -112,86 +118,50 @@ GOOS=windows GOARCH=386 go build -ldflags="-H windowsgui" -o RuntimeBroker.exe m
 ```mermaid
 graph TD
     A[Inicio main.go] --> B[Cargar config.json]
-    B --> C[Inicializar Log en %TEMP%]
-    C --> D[Crear SessionManager]
-    D --> E{keep_alive.enabled?}
-    E -->|No| F[Log: Bot deshabilitado y salir]
-    E -->|Si| G[Iniciar goroutine con ticker]
-    G --> H[Cada N segundos]
-    H --> I[GetCursorPosition via user32.dll]
-    I --> J[SetCursorPosition X+1, Y+1]
-    J --> K[Sleep 10ms]
-    K --> L[SetCursorPosition X, Y original]
-    L --> M[Log: Sesión mantenida activa]
-    M --> H
+    B --> C[Inicializar Log]
+    C --> D{Intentar adquirir Instance Lock}
+    D -->|Mutex existe| E[Leer PID anterior y matar proceso viejo]
+    E --> F[Reintentar adquirir Mutex]
+    D -->|Mutex libre| F
+    F --> G[Guardar nuevo PID]
+    G --> H{Auth habilitada?}
+    H -->|No| I[Omitir validación]
+    H -->|Si| J[Paso 1: OAuth -> Obtener email real del usuario]
+    J --> K[Paso 2: Service Account -> Leer hoja privada]
+    K --> L{¿Email tiene permiso 'ejecuta:mm'?}
+    L -->|No| M[ACCESO DENEGADO: Cerrar bot]
+    L -->|Si| N[Iniciar SessionManager]
+    I --> N
+    N --> O[Cada interval_seconds]
+    O --> P{¿Inactividad >= idle_threshold?}
+    P -->|No| Q[Pausar: Usuario activo]
+    P -->|Si| R[Simular presión de tecla F13]
+    R --> O
+    S[Señal Ctrl+C / SIGTERM] --> T[Release Mutex y Cleanup]
+    T --> U[Fin del proceso]
 ```
 
 ---
 
-## 🔄 Diagrama de Arquitectura
+## 🔒 Seguridad, Camuflaje y Robustez
 
-```mermaid
-graph TB
-    subgraph "main.go Orquestador"
-        A[Instanciar Config]
-        B[Crear SessionManager]
-        C[WaitForShutdown]
-        D[Cleanup]
-    end
-    
-    subgraph "controller Servicios"
-        E[Config.go]
-        F[Log.go]
-        G[SessionManager.go]
-    end
-    
-    subgraph "Platform-Specific"
-        H[cursor_windows.go<br/>user32.dll]
-        I[cursor_other.go<br/>Stub no-Windows]
-    end
-    
-    subgraph "Sistema Operativo"
-        J[Windows API]
-        K[%TEMP% Logs]
-        L[RuntimeBroker.exe]
-    end
-    
-    A --> E
-    E -->|Configura| G
-    E -->|Inicializa| F
-    B --> G
-    G -->|Usa| F
-    G -->|Windows| H
-    G -->|Linux/Mac| I
-    H --> J
-    F --> K
-    C -->|Ctrl+C| D
-    D -->|Stop| G
-    L -.->|Proceso| J
-```
+1. **Nombre de Proceso:** El ejecutable se compila como `RuntimeBroker.exe`. En el Administrador de Tareas se camufla entre las múltiples instancias legítimas de este proceso de Windows.
+2. **Tecla Fantasma (F13):** A diferencia de mover el mouse o presionar teclas numéricas, F13 es una tecla virtual que **no escribe caracteres, no activa LEDs y no interfiere** con aplicaciones activas.
+3. **Autenticación Híbrida:** 
+   - **OAuth 2.0** garantiza que el correo del usuario es real y no fue falsificado en un archivo de texto.
+   - **Service Account** permite leer la hoja de permisos de forma privada, sin exponer los datos de otros usuarios.
+4. **Instancia Única Garantizada:** Utiliza un `Named Mutex` global y un archivo PID. Si se intenta ejecutar el bot dos veces, la nueva instancia detectará la anterior, la terminará de forma controlada y tomará su lugar.
+5. **Detección de Inactividad:** Usa `GetLastInputInfo` de Windows. Si el usuario está usando el teclado o el mouse, el bot **se pausa automáticamente** y espera, evitando interferencias.
+6. **Credenciales Embebidas:** Los archivos JSON de Google Cloud se compilan directamente dentro del binario, evitando archivos sueltos y facilitando la distribución.
 
----
+### Verificación y Control (Windows)
 
-## 🔒 Seguridad y Camuflaje
-
-1. **Nombre de Proceso:** El ejecutable se compila como `RuntimeBroker.exe`, que es un proceso legítimo de Windows. En el Administrador de Tareas aparecerá junto a otras instancias del RuntimeBroker real.
-
-2. **Sin Consola Visible:** La flag `-H windowsgui` oculta la ventana de consola, ejecutándose completamente en segundo plano.
-
-3. **Logs Discretos:** Por defecto, los logs se guardan en `%TEMP%` (`C:\Users\USUARIO\AppData\Local\Temp\logs\`), una ubicación común para aplicaciones legítimas.
-
-4. **Movimientos Imperceptibles:** El bot mueve el mouse solo 1 píxel y regresa inmediatamente (10ms), invisible para el usuario pero suficiente para resetear el temporizador de inactividad de Windows.
-
-5. **Thread-Safe:** Todo el sistema de logging y gestión de configuración usa `sync.Mutex` para garantizar integridad en operaciones concurrentes.
-
-### Verificación y Control
-
-**Verificar si está corriendo (Windows):**
+**Verificar si está corriendo:**
 ```cmd
 tasklist /FI "IMAGENAME eq RuntimeBroker.exe"
 ```
 
-**Detener el proceso:**
+**Detener el proceso manualmente:**
 ```cmd
 taskkill /F /IM RuntimeBroker.exe
 ```
@@ -200,39 +170,49 @@ taskkill /F /IM RuntimeBroker.exe
 
 ## 📝 Sistema de Logs
 
-El bot genera logs automáticamente en la ubicación configurada:
+El bot genera logs automáticamente. Si no tiene permisos en `%TEMP%`, usa la carpeta del ejecutable como fallback.
 
 **Ruta por defecto:**
-```
-%TEMP%\logs\procesos\LogProcesos_2026-07-23.txt
-%TEMP%\logs\errores\LogErrores_2026-07-23.txt
-```
-
-**Ejemplo de log:**
-```
-========================================================================================================================
-| INICIO DE EJECUCIÓN - KeepAliveBot - 2026-07-23 15:30:00                                                           |
-========================================================================================================================
-| INFO: Iniciado. Intervalo: 60 segundos                                                                   |
-| Hora: 2026-07-23 15:30:00                                                                                           |
-========================================================================================================================
-| SUCCESS: Mouse movido y regresado a posición original                                                               |
-| Hora: 2026-07-23 15:31:00                                                                                           |
-========================================================================================================================
+```text
+C:\Users\TU_USUARIO\AppData\Local\Temp\logs\procesos\LogProcesos_2026-07-25.txt
+C:\Users\TU_USUARIO\AppData\Local\Temp\logs\errores\LogErrores_2026-07-25.txt
 ```
 
-**Limpieza automática:** Los logs de más de 7 días se eliminan automáticamente al iniciar el bot.
+**Ejemplo de log exitoso:**
+```text
+========================================================================================================================
+| INICIO DE EJECUCIÓN - RuntimeBroker - 2026-07-25 12:56:27                                                           |
+========================================================================================================================
+| SUCCESS: 🔒 Instancia única adquirida (PID: 2040)                                                                   |
+| Hora: 2026-07-25 12:56:27                                                                                            |
+========================================================================================================================
+| INFO: 🔐 Paso 1: Verificando identidad del usuario vía OAuth...                                                     |
+| Hora: 2026-07-25 12:56:27                                                                                            |
+========================================================================================================================
+| SUCCESS: ✅ Identidad verificada: usuario@empresa.com                                                                 |
+| Hora: 2026-07-25 12:56:27                                                                                            |
+========================================================================================================================
+| INFO: 🔍 Paso 2: Validando permisos en hoja privada...                                                              |
+| Hora: 2026-07-25 12:56:27                                                                                            |
+========================================================================================================================
+| SUCCESS: ✅ Usuario usuario@empresa.com validado correctamente con permiso 'ejecuta:mm'                             |
+| Hora: 2026-07-25 12:56:27                                                                                            |
+========================================================================================================================
+| INFO: ⌨️  Keep-Alive iniciado. Intervalo: 60s, Umbral de inactividad: 30s                                           |
+| Hora: 2026-07-25 12:56:27                                                                                            |
+========================================================================================================================
+```
+*Nota: Los logs de más de 7 días se eliminan automáticamente al iniciar el bot.*
 
 ---
 
 ## 🚀 Instalación del MSI
 
-El instalador `RuntimeBroker.msi` realiza:
-
+El instalador `RuntimeBroker.msi` realiza las siguientes acciones en Windows:
 1. **Instala en:** `C:\Program Files\RuntimeBroker\`
 2. **Crea acceso directo:** Menú Inicio → "Runtime Broker"
 3. **Registra en:** `HKCU\Software\Microsoft\RuntimeBroker`
-4. **Fabricante:** Microsoft Corporation (para mayor camuflaje)
+4. **Fabricante:** Microsoft Corporation (para mayor camuflaje en la lista de programas)
 
 **Para instalar:**
 ```cmd
@@ -243,48 +223,49 @@ msiexec /i RuntimeBroker.msi
 ```cmd
 msiexec /x RuntimeBroker.msi
 ```
-O desde "Agregar o quitar programas" en Windows.
+*(O desde "Agregar o quitar programas" en Windows).*
 
 ---
 
 ## 🧪 Desarrollo y Testing
 
-### Compilar para Linux (Testing)
+### Compilar para Linux (Testing de lógica)
 ```bash
 go build -o keepalive-test main.go
 ./keepalive-test
 ```
-Verás un error: `"movimiento de mouse no soportado en linux"` (esto es esperado, usa `cursor_other.go`).
+*Es esperado ver mensajes indicando que la simulación de teclas y la instancia única no están soportadas en Linux, ya que el código usa los archivos `*_other.go`.*
 
 ### Ver archivos compilados por plataforma
 ```bash
-# Para Windows
+# Para Windows (incluye lógica real)
 GOOS=windows go list -f '{{.GoFiles}}' ./controller
-# Salida: [Config.go SessionManager.go Log.go cursor_windows.go]
+# Salida: [Config.go GoogleAuth.go InstanceLock.go Log.go SessionManager.go credentials.go dlls_windows.go keyboard_windows.go service.go]
 
-# Para Linux
+# Para Linux (incluye solo stubs)
 go list -f '{{.GoFiles}}' ./controller
-# Salida: [Config.go SessionManager.go Log.go cursor_other.go]
+# Salida: [Config.go GoogleAuth.go Log.go SessionManager.go credentials.go instance_other.go keyboard_other.go service.go]
 ```
 
 ---
 
 ## 💡 Créditos y Referencias
 
-- **API de Windows:** Uso de `golang.org/x/sys/windows` para llamadas nativas a `user32.dll`
-- **Build Tags:** Implementación de compilación condicional con `//go:build windows` y `//go:build !windows`
-- **WiX Toolset:** Generación de MSI con `wixl` (implementación de WiX para Linux)
-- **Principios de Diseño:** Single Responsibility, Thread-Safe Operations, Graceful Shutdown
+- **API de Windows:** Uso de `golang.org/x/sys/windows` para llamadas nativas a `user32.dll` (`keybd_event`, `GetLastInputInfo`) y `kernel32.dll` (`CreateMutexW`, `GetTickCount`).
+- **Google APIs:** Uso de `golang.org/x/oauth2` y `google.golang.org/api/sheets/v4` para el flujo de autenticación híbrido.
+- **Build Tags:** Implementación de compilación condicional con `//go:build windows` y `//go:build !windows` para mantener un código base multiplataforma limpio.
+- **WiX Toolset:** Generación de MSI con `wixl` (implementación de WiX para Linux).
+- **Principios de Diseño:** Single Responsibility, Thread-Safe Operations, Graceful Shutdown, Fail-Safe Fallbacks y Credenciales Embebidas.
 
 ---
 
 ## ⚠️ Disclaimer
 
-Este proyecto está diseñado para uso personal y educativo. El camuflaje como `RuntimeBroker.exe` es solo para evitar distracciones visuales en el Administrador de Tareas. El bot:
+Este proyecto está diseñado para uso personal, educativo y de administración de sistemas. El camuflaje como `RuntimeBroker.exe` es solo para evitar distracciones visuales en el Administrador de Tareas y mantener un perfil bajo. El bot:
 
-- ✅ NO reemplaza el RuntimeBroker.exe legítimo de Windows
-- ✅ NO tiene funcionalidades maliciosas
-- ✅ Solo mueve el mouse 1 píxel cada N segundos
-- ✅ Se puede detener fácilmente con `taskkill`
+- ✅ **NO** reemplaza ni interfiere con el `RuntimeBroker.exe` legítimo de Windows.
+- ✅ **NO** tiene funcionalidades maliciosas, keyloggers ni de exfiltración de datos.
+- ✅ **SOLO** simula la presión de la tecla virtual F13 cuando el sistema está inactivo.
+- ✅ Se puede detener fácilmente con `taskkill` o reiniciando el equipo.
 
-Úsalo responsablemente y respeta las políticas de tu organización si es un entorno corporativo.
+Úsalo responsablemente y respeta las políticas de seguridad de tu organización si se despliega en un entorno corporativo.
