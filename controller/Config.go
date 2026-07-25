@@ -2,7 +2,6 @@ package controller
 
 import (
 	"encoding/json"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,12 +10,13 @@ import (
 type KeepAliveConfig struct {
 	Enabled       bool `json:"enabled"`
 	Interval      int  `json:"interval_seconds"`
-	IdleThreshold int  `json:"idle_threshold_seconds"` // Tiempo de inactividad antes de activarse
+	IdleThreshold int  `json:"idle_threshold_seconds"`
 }
 
 type ConfigData struct {
-	KeepAlive KeepAliveConfig `json:"keep_alive"`
-	LogPath   string          `json:"log_path,omitempty"`
+	KeepAlive KeepAliveConfig   `json:"keep_alive"`
+	LogPath   string            `json:"log_path,omitempty"`
+	Auth      *HybridAuthConfig `json:"auth,omitempty"`
 }
 
 type Config struct {
@@ -28,13 +28,8 @@ type Config struct {
 
 func NewConfig() *Config {
 	c := &Config{}
-
-	// 1. Cargar configuración primero para saber la ruta
 	c.loadConfigJSON()
-
-	// 2. Inicializar el Log con la ruta resuelta (o %TEMP% si está vacío)
 	c.Log = NewLog(c.getLogBaseDir())
-
 	return c
 }
 
@@ -46,14 +41,14 @@ func (c *Config) loadConfigJSON() {
 		return
 	}
 
-	// Valores por defecto
 	c.configData = &ConfigData{
 		KeepAlive: KeepAliveConfig{
 			Enabled:       true,
 			Interval:      60,
-			IdleThreshold: 30, // 30 segundos por defecto
+			IdleThreshold: 30,
 		},
 		LogPath: "",
+		Auth:    nil,
 	}
 
 	data, err := os.ReadFile("config.json")
@@ -66,74 +61,6 @@ func (c *Config) loadConfigJSON() {
 	}
 }
 
-func (c *Config) initLogFile() {
-	// Determinar la ruta del log
-	logPath := c.getLogFilePath()
-
-	// Crear directorio si no existe
-	logDir := filepath.Dir(logPath)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return
-	}
-
-	// Abrir archivo de log (crear o append)
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return
-	}
-
-	c.logFile = file
-	log.SetOutput(file)
-	log.SetFlags(log.Ldate | log.Ltime)
-}
-
-func (c *Config) getLogFilePath() string {
-	c.configMu.Lock()
-	defer c.configMu.Unlock()
-
-	// Si hay una ruta personalizada en config.json, usarla
-	if c.configData != nil && c.configData.LogPath != "" {
-		// Expandir variables de entorno como %TEMP% o $HOME
-		expandedPath := os.ExpandEnv(c.configData.LogPath)
-
-		// Si es una ruta relativa, hacerla absoluta desde el directorio actual
-		if !filepath.IsAbs(expandedPath) {
-			if absPath, err := filepath.Abs(expandedPath); err == nil {
-				expandedPath = absPath
-			}
-		}
-
-		return filepath.Join(expandedPath, "runtime_broker.log")
-	}
-
-	// Fallback: usar directorio temporal del sistema
-	tempDir := os.TempDir()
-	return filepath.Join(tempDir, "runtime_broker.log")
-}
-
-func (c *Config) GetLogFilePath() string {
-	return c.getLogFilePath()
-}
-
-func (c *Config) LogToFile(message string) {
-	if c.logFile != nil {
-		log.Println(message)
-	}
-}
-
-func (c *Config) Close() {
-	if c.logFile != nil {
-		c.logFile.Close()
-	}
-}
-
-func (c *Config) GetKeepAliveConfig() KeepAliveConfig {
-	c.configMu.Lock()
-	defer c.configMu.Unlock()
-	return c.configData.KeepAlive
-}
-
-// getLogBaseDir resuelve la ruta base para los logs
 func (c *Config) getLogBaseDir() string {
 	c.configMu.Lock()
 	defer c.configMu.Unlock()
@@ -149,4 +76,26 @@ func (c *Config) getLogBaseDir() string {
 	}
 
 	return os.TempDir()
+}
+
+func (c *Config) GetKeepAliveConfig() KeepAliveConfig {
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	return c.configData.KeepAlive
+}
+
+func (c *Config) GetHybridAuthConfig() HybridAuthConfig {
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+
+	if c.configData.Auth == nil {
+		return HybridAuthConfig{}
+	}
+	return *c.configData.Auth
+}
+
+func (c *Config) Close() {
+	if c.logFile != nil {
+		c.logFile.Close()
+	}
 }
