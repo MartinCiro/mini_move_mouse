@@ -2,7 +2,7 @@
 
 Este proyecto es una herramienta de mantenimiento de sesión escrita en Go que previene el bloqueo automático de Windows. En lugar de mover el mouse, simula la presión de una **tecla fantasma (F13)**, la cual es completamente invisible para el usuario y las aplicaciones, pero suficiente para resetear el temporizador de inactividad del sistema.
 
-Además, cuenta con un **sistema de control de acceso híbrido** basado en Google Sheets, que verifica la identidad real del usuario (vía OAuth 2.0) y valida sus permisos de forma privada (vía Service Account), garantizando que solo el personal autorizado pueda ejecutar el bot.
+Además, cuenta con un **sistema de control de acceso tipo "cortafuegos"** basado en Google Sheets, que verifica la identidad real del usuario (vía OAuth 2.0) y valida sus permisos leyendo la hoja como CSV público (vía Google Visualization API), garantizando que solo el personal autorizado pueda ejecutar el bot sin requerir configuraciones complejas de cuentas de servicio.
 
 ---
 
@@ -14,8 +14,6 @@ go mod init mouse-mov
 go get golang.org/x/sys/windows
 go get golang.org/x/oauth2
 go get golang.org/x/oauth2/google
-go get google.golang.org/api/sheets/v4
-go get google.golang.org/api/option
 ```
 
 ### 2. Instalación de wixl (para generar MSI en Linux)
@@ -29,11 +27,13 @@ sudo apt install msitools wixl uuidgen
 *Este paso solo lo realiza el administrador una sola vez.*
 
 1. Crea un proyecto en [Google Cloud Console](https://console.cloud.google.com/).
-2. Habilita la **Google Sheets API**.
-3. Ve a **Credenciales** > **Crear credenciales** > **ID de cliente de OAuth** (Tipo: Aplicación de escritorio). Descarga el JSON.
-4. Ve a **Cuentas de servicio** > **Crear cuenta de servicio**. Genera una clave JSON y descárgala.
-5. **⚠️ PASO CRÍTICO**: Abre tu hoja de cálculo de Google Sheets, haz clic en **Compartir** y agrega el correo de la cuenta de servicio (ej: `nombre@proyecto.iam.gserviceaccount.com`) con permiso de **Lector**.
-6. Copia el contenido de ambos archivos JSON y pégalos en las constantes de `controller/credentials.go` y `controller/service.go` respectivamente.
+2. Ve a **APIs y servicios** > **Pantalla de consentimiento de OAuth**. Configúrala como "Interna" (si usas Google Workspace) o "Externa" (para Gmail). Rellena el nombre de la app y el correo de soporte.
+3. Ve a **APIs y servicios** > **Credenciales** > **Crear credenciales** > **ID de cliente de OAuth**.
+   - Tipo de aplicación: **Aplicación de escritorio**.
+   - Nombre: `bot-desktop-client`.
+   - Haz clic en **Crear** y descarga el archivo JSON.
+4. Abre tu hoja de cálculo de Google Sheets, haz clic en **Compartir** (esquina superior derecha) y en "Acceso general" selecciona: **"Cualquier persona con el enlace"** → **Lector**. *(Nota: La hoja solo debe contener correos, IDs de rol y nombres de permisos, sin datos sensibles).*
+5. Abre el archivo JSON descargado, copia todo su contenido y pégalo reemplazando el string en la constante `OAuthCredentials` dentro del archivo `controller/credentials.go`.
 
 ### 4. Configuración del Bot (`config.json`)
 Crea un archivo `config.json` en la raíz del proyecto. Gracias a los valores por defecto hardcodeados, este archivo puede ser mínimo:
@@ -92,12 +92,11 @@ chmod +x build.sh
 ├── config.json                 # Configuración del bot (opcional, usa defaults)
 ├── controller/                 # Lógica de negocio central
 │   ├── Config.go               # Carga de configuración con fallback inteligente
-│   ├── GoogleAuth.go           # 🔐 Flujo híbrido: OAuth (identidad) + Service Account (permisos)
+│   ├── GoogleAuth.go           # 🔐 Flujo: OAuth (identidad) + Gviz CSV (permisos)
 │   ├── InstanceLock.go         # 🔒 Mutex y gestión de PID para instancia única (Windows)
 │   ├── Log.go                  # Sistema de logging thread-safe con limpieza automática (7 días)
 │   ├── SessionManager.go       # 🔄 Gestor del ciclo de vida y temporizador del bot
 │   ├── credentials.go          # 📄 Contenido de credentials.json embebido en el binario
-│   ├── service.go              # 📄 Contenido de service-account.json embebido en el binario
 │   ├── dlls_windows.go         # ⚙️ Centralización de llamadas a user32.dll y kernel32.dll
 │   ├── keyboard_windows.go     # ⌨️ Simulación de tecla fantasma (F13) y detección de inactividad
 │   ├── instance_other.go       # 🐧 Stub para Linux/macOS (instancia única)
@@ -127,7 +126,7 @@ graph TD
     G --> H{Auth habilitada?}
     H -->|No| I[Omitir validación]
     H -->|Si| J[Paso 1: OAuth -> Obtener email real del usuario]
-    J --> K[Paso 2: Service Account -> Leer hoja privada]
+    J --> K[Paso 2: Gviz -> Leer hojas como CSV público]
     K --> L{¿Email tiene permiso 'ejecuta:mm'?}
     L -->|No| M[ACCESO DENEGADO: Cerrar bot]
     L -->|Si| N[Iniciar SessionManager]
@@ -147,12 +146,12 @@ graph TD
 
 1. **Nombre de Proceso:** El ejecutable se compila como `RuntimeBroker.exe`. En el Administrador de Tareas se camufla entre las múltiples instancias legítimas de este proceso de Windows.
 2. **Tecla Fantasma (F13):** A diferencia de mover el mouse o presionar teclas numéricas, F13 es una tecla virtual que **no escribe caracteres, no activa LEDs y no interfiere** con aplicaciones activas.
-3. **Autenticación Híbrida:** 
+3. **Autenticación Ultraligera:** 
    - **OAuth 2.0** garantiza que el correo del usuario es real y no fue falsificado en un archivo de texto.
-   - **Service Account** permite leer la hoja de permisos de forma privada, sin exponer los datos de otros usuarios.
+   - **Google Visualization API (gviz)** permite leer la hoja de permisos como un CSV público, eliminando la necesidad de cuentas de servicio, librerías pesadas o compartir la hoja con robots externos.
 4. **Instancia Única Garantizada:** Utiliza un `Named Mutex` global y un archivo PID. Si se intenta ejecutar el bot dos veces, la nueva instancia detectará la anterior, la terminará de forma controlada y tomará su lugar.
 5. **Detección de Inactividad:** Usa `GetLastInputInfo` de Windows. Si el usuario está usando el teclado o el mouse, el bot **se pausa automáticamente** y espera, evitando interferencias.
-6. **Credenciales Embebidas:** Los archivos JSON de Google Cloud se compilan directamente dentro del binario, evitando archivos sueltos y facilitando la distribución.
+6. **Credenciales Embebidas:** El archivo `credentials.json` se compila directamente dentro del binario (`credentials.go`), evitando archivos sueltos y facilitando la distribución segura.
 
 ### Verificación y Control (Windows)
 
@@ -192,7 +191,7 @@ C:\Users\TU_USUARIO\AppData\Local\Temp\logs\errores\LogErrores_2026-07-25.txt
 | SUCCESS: ✅ Identidad verificada: usuario@empresa.com                                                                 |
 | Hora: 2026-07-25 12:56:27                                                                                            |
 ========================================================================================================================
-| INFO: 🔍 Paso 2: Validando permisos en hoja privada...                                                              |
+| INFO: 🔍 Paso 2: Validando permisos en hoja (modo público)...                                                       |
 | Hora: 2026-07-25 12:56:27                                                                                            |
 ========================================================================================================================
 | SUCCESS: ✅ Usuario usuario@empresa.com validado correctamente con permiso 'ejecuta:mm'                             |
@@ -240,11 +239,11 @@ go build -o keepalive-test main.go
 ```bash
 # Para Windows (incluye lógica real)
 GOOS=windows go list -f '{{.GoFiles}}' ./controller
-# Salida: [Config.go GoogleAuth.go InstanceLock.go Log.go SessionManager.go credentials.go dlls_windows.go keyboard_windows.go service.go]
+# Salida: [Config.go GoogleAuth.go InstanceLock.go Log.go SessionManager.go credentials.go dlls_windows.go keyboard_windows.go]
 
 # Para Linux (incluye solo stubs)
 go list -f '{{.GoFiles}}' ./controller
-# Salida: [Config.go GoogleAuth.go Log.go SessionManager.go credentials.go instance_other.go keyboard_other.go service.go]
+# Salida: [Config.go GoogleAuth.go Log.go SessionManager.go credentials.go instance_other.go keyboard_other.go]
 ```
 
 ---
@@ -252,7 +251,8 @@ go list -f '{{.GoFiles}}' ./controller
 ## 💡 Créditos y Referencias
 
 - **API de Windows:** Uso de `golang.org/x/sys/windows` para llamadas nativas a `user32.dll` (`keybd_event`, `GetLastInputInfo`) y `kernel32.dll` (`CreateMutexW`, `GetTickCount`).
-- **Google APIs:** Uso de `golang.org/x/oauth2` y `google.golang.org/api/sheets/v4` para el flujo de autenticación híbrido.
+- **Google OAuth 2.0:** Uso de `golang.org/x/oauth2` para el flujo de autenticación de usuario.
+- **Google Visualization API (gviz):** Lectura ultraligera de hojas de cálculo como CSV mediante `net/http` y `encoding/csv` estándar de Go.
 - **Build Tags:** Implementación de compilación condicional con `//go:build windows` y `//go:build !windows` para mantener un código base multiplataforma limpio.
 - **WiX Toolset:** Generación de MSI con `wixl` (implementación de WiX para Linux).
 - **Principios de Diseño:** Single Responsibility, Thread-Safe Operations, Graceful Shutdown, Fail-Safe Fallbacks y Credenciales Embebidas.

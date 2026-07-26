@@ -19,16 +19,16 @@ func main() {
 	}
 	defer instanceLock.Release(config.Log)
 
-	authConfig := config.GetHybridAuthConfig()
-	auth, err := controller.NewHybridAuth(&authConfig)
+	authConfig := config.GetAuthConfig()
+	auth, err := controller.NewUserAuth(&authConfig)
 	if err != nil {
-		config.Log.Error(fmt.Sprintf("Error inicializando autenticación híbrida: %v", err), "HybridAuth")
+		config.Log.Error(fmt.Sprintf("Error inicializando autenticación: %v", err), "UserAuth")
 		os.Exit(1)
 	}
 
 	userEmail, err := auth.ValidateUser(config.Log)
 	if err != nil {
-		config.Log.Error(fmt.Sprintf("ACCESO DENEGADO: %v", err), "HybridAuth")
+		config.Log.Error(fmt.Sprintf("ACCESO DENEGADO: %v", err), "UserAuth")
 		fmt.Fprintf(os.Stderr, "❌ Error de autorización: %v\n", err)
 		os.Exit(1)
 	}

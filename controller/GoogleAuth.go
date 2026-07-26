@@ -2,10 +2,13 @@ package controller
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -14,8 +17,6 @@ import (
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"google.golang.org/api/option"
-	"google.golang.org/api/sheets/v4"
 )
 
 // ============================================================
@@ -27,16 +28,16 @@ const (
 	DefaultTokenPath          = "token.json"
 )
 
-// HybridAuthConfig configuración para OAuth + Service Account
-type HybridAuthConfig struct {
+// AuthConfig configuración para OAuth + Gviz
+type AuthConfig struct {
 	Enabled            *bool  `json:"enabled,omitempty"`
 	SpreadsheetID      string `json:"spreadsheet_id,omitempty"`
 	RequiredPermission string `json:"required_permission,omitempty"`
 	TokenPath          string `json:"token_path,omitempty"`
+	// ❌ Ya NO existe CredentialsPath
 }
 
-// ApplyDefaults completa los valores faltantes con los defaults hardcodeados
-func (c *HybridAuthConfig) ApplyDefaults() {
+func (c *AuthConfig) ApplyDefaults() {
 	if c.Enabled == nil {
 		defaultTrue := true
 		c.Enabled = &defaultTrue
@@ -52,71 +53,69 @@ func (c *HybridAuthConfig) ApplyDefaults() {
 	}
 }
 
-// IsEnabled retorna si la autenticación está habilitada
-func (c *HybridAuthConfig) IsEnabled() bool {
+func (c *AuthConfig) IsEnabled() bool {
 	return c.Enabled != nil && *c.Enabled
 }
 
-// HybridAuth maneja el flujo híbrido
-type HybridAuth struct {
-	config      *HybridAuthConfig
+// UserAuth maneja el flujo de autenticación
+type UserAuth struct {
+	config      *AuthConfig
 	oauthConfig *oauth2.Config
 }
 
-// NewHybridAuth inicializa el gestor de autenticación híbrida
-func NewHybridAuth(config *HybridAuthConfig) (*HybridAuth, error) {
+func NewUserAuth(config *AuthConfig) (*UserAuth, error) {
 	config.ApplyDefaults()
 
-	// Usar credenciales embebidas de credentials.go
+	// ✅ USAR CREDENCIALES EMBEBIDAS de credentials.go
 	oauthConfig, err := google.ConfigFromJSON([]byte(OAuthCredentials), "https://www.googleapis.com/auth/userinfo.email")
 	if err != nil {
 		return nil, fmt.Errorf("error configurando OAuth: %v", err)
 	}
 
-	return &HybridAuth{
+	return &UserAuth{
 		config:      config,
 		oauthConfig: oauthConfig,
 	}, nil
 }
 
-// ValidateUser ejecuta el flujo completo: OAuth para identidad + Service Account para validar permisos
-func (ha *HybridAuth) ValidateUser(log *Log) (string, error) {
-	if !ha.config.IsEnabled() {
-		log.Comentario("WARNING", "⚠️ Validación híbrida deshabilitada. Omitiendo...")
+func (ua *UserAuth) ValidateUser(log *Log) (string, error) {
+	if !ua.config.IsEnabled() {
+		log.Comentario("WARNING", "⚠️ Validación deshabilitada. Omitiendo...")
 		return "", nil
 	}
 
 	ctx := context.Background()
 
+	// PASO 1: Obtener identidad real vía OAuth
 	log.Comentario("INFO", "🔐 Paso 1: Verificando identidad del usuario vía OAuth...")
-	userEmail, err := ha.getUserEmail(ctx, log)
+	userEmail, err := ua.getUserEmail(ctx, log)
 	if err != nil {
-		return "", fmt.Errorf("error obteniendo identidad del usuario: %v", err)
+		return "", fmt.Errorf("error obteniendo identidad: %v", err)
 	}
 	log.Comentario("SUCCESS", fmt.Sprintf("✅ Identidad verificada: %s", userEmail))
 
-	log.Comentario("INFO", "🔍 Paso 2: Validando permisos en hoja privada...")
-	if err := ha.validatePermissionsWithServiceAccount(ctx, userEmail, log); err != nil {
+	// PASO 2: Validar permisos leyendo la hoja pública vía Gviz (CSV)
+	log.Comentario("INFO", "🔍 Paso 2: Validando permisos en hoja (modo público)...")
+	if err := ua.validatePermissionsViaGviz(userEmail, log); err != nil {
 		return "", err
 	}
 
 	return userEmail, nil
 }
 
-// getUserEmail usa OAuth para obtener el email real del usuario
-func (ha *HybridAuth) getUserEmail(ctx context.Context, log *Log) (string, error) {
-	token, err := ha.tokenFromFile(ha.config.TokenPath)
+func (ua *UserAuth) getUserEmail(ctx context.Context, log *Log) (string, error) {
+	token, err := ua.tokenFromFile(ua.config.TokenPath)
 	if err == nil && token.Valid() {
 		log.Comentario("INFO", "✅ Token de sesión encontrado. Usando identidad guardada.")
 	} else {
 		log.Comentario("INFO", "ℹ️ Iniciando flujo de autenticación en navegador...")
-		token, err = ha.getTokenInteractively(ctx, log)
+		token, err = ua.getTokenInteractively(ctx, log)
 		if err != nil {
 			return "", err
 		}
 	}
 
-	client := ha.oauthConfig.Client(ctx, token)
+	client := ua.oauthConfig.Client(ctx, token)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
 	if err != nil {
 		return "", fmt.Errorf("error obteniendo información del usuario: %v", err)
@@ -133,8 +132,7 @@ func (ha *HybridAuth) getUserEmail(ctx context.Context, log *Log) (string, error
 	return userInfo.Email, nil
 }
 
-// getTokenInteractively abre navegador y captura el token
-func (ha *HybridAuth) getTokenInteractively(ctx context.Context, log *Log) (*oauth2.Token, error) {
+func (ua *UserAuth) getTokenInteractively(ctx context.Context, log *Log) (*oauth2.Token, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("no se pudo iniciar servidor local: %v", err)
@@ -143,12 +141,11 @@ func (ha *HybridAuth) getTokenInteractively(ctx context.Context, log *Log) (*oau
 	listener.Close()
 
 	redirectURL := fmt.Sprintf("http://localhost:%d/", port)
-	ha.oauthConfig.RedirectURL = redirectURL
-
-	authURL := ha.oauthConfig.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	ua.oauthConfig.RedirectURL = redirectURL
+	authURL := ua.oauthConfig.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 
 	log.Comentario("INFO", "🌐 Abriendo navegador para autenticación...")
-	ha.openBrowser(authURL)
+	ua.openBrowser(authURL)
 
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
@@ -157,7 +154,7 @@ func (ha *HybridAuth) getTokenInteractively(ctx context.Context, log *Log) (*oau
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			errCh <- fmt.Errorf("no se recibió código de autorización")
+			errCh <- fmt.Errorf("no se recibió código")
 			return
 		}
 		w.Write([]byte("✅ Autenticación exitosa. Puedes cerrar esta pestaña."))
@@ -174,7 +171,7 @@ func (ha *HybridAuth) getTokenInteractively(ctx context.Context, log *Log) (*oau
 	select {
 	case code = <-codeCh:
 		srv.Shutdown(ctx)
-	case err = <-errCh:
+	case err := <-errCh:
 		srv.Shutdown(ctx)
 		return nil, err
 	case <-time.After(2 * time.Minute):
@@ -182,57 +179,79 @@ func (ha *HybridAuth) getTokenInteractively(ctx context.Context, log *Log) (*oau
 		return nil, fmt.Errorf("tiempo de espera agotado")
 	}
 
-	token, err := ha.oauthConfig.Exchange(ctx, code)
+	token, err := ua.oauthConfig.Exchange(ctx, code)
 	if err != nil {
-		return nil, fmt.Errorf("error intercambiando código por token: %v", err)
+		return nil, fmt.Errorf("error intercambiando código: %v", err)
 	}
 
-	if err := ha.saveToken(ha.config.TokenPath, token); err != nil {
+	if err := ua.saveToken(ua.config.TokenPath, token); err != nil {
 		log.Comentario("WARNING", fmt.Sprintf("⚠️ No se pudo guardar token: %v", err))
 	}
 
 	return token, nil
 }
 
-// validatePermissionsWithServiceAccount usa la Cuenta de Servicio embebida para leer la hoja
-func (ha *HybridAuth) validatePermissionsWithServiceAccount(ctx context.Context, userEmail string, log *Log) error {
-	// Usar credenciales embebidas de service.go
-	srv, err := sheets.NewService(ctx, option.WithCredentialsJSON([]byte(ServiceAccountCredentials)))
-	if err != nil {
-		return fmt.Errorf("error creando servicio con Service Account: %v", err)
-	}
+// validatePermissionsViaGviz lee las hojas como CSV público
+func (ua *UserAuth) validatePermissionsViaGviz(userEmail string, log *Log) error {
+	fetchCSV := func(sheetName string) ([][]string, error) {
+		gvizURL := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/gviz/tq?tqx=out:csv&sheet=%s",
+			ua.config.SpreadsheetID, url.QueryEscape(sheetName))
 
-	readSheet := func(rangeName string) ([][]interface{}, error) {
-		resp, err := srv.Spreadsheets.Values.Get(ha.config.SpreadsheetID, rangeName).Do()
+		resp, err := http.Get(gvizURL)
 		if err != nil {
 			return nil, err
 		}
-		return resp.Values, nil
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("error HTTP %d al leer hoja %s", resp.StatusCode, sheetName)
+		}
+
+		reader := csv.NewReader(resp.Body)
+		reader.LazyQuotes = true // Maneja mejor las comillas de Google
+
+		var records [][]string
+		for {
+			record, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			// Limpiar comillas dobles que Google a veces añade
+			for i := range record {
+				record[i] = strings.Trim(record[i], "\"")
+			}
+			records = append(records, record)
+		}
+		return records, nil
 	}
 
-	usersData, err := readSheet("users!A:G")
+	usersData, err := fetchCSV("users")
 	if err != nil {
 		return fmt.Errorf("error leyendo hoja 'users': %v", err)
 	}
 
-	rolePermsData, err := readSheet("rol_x_permiso!A:B")
+	rolePermsData, err := fetchCSV("rol_x_permiso")
 	if err != nil {
 		return fmt.Errorf("error leyendo hoja 'rol_x_permiso': %v", err)
 	}
 
-	permsData, err := readSheet("permisos!A:C")
+	permsData, err := fetchCSV("permisos")
 	if err != nil {
 		return fmt.Errorf("error leyendo hoja 'permisos': %v", err)
 	}
 
+	// Construir mapas (lógica idéntica a la anterior)
 	userMap := make(map[string]struct{ IDRol, Status string })
 	for i, row := range usersData {
 		if i == 0 || len(row) < 4 {
 			continue
 		}
-		email := strings.TrimSpace(fmt.Sprintf("%v", row[1]))
-		idRol := strings.TrimSpace(fmt.Sprintf("%v", row[2]))
-		status := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", row[3])))
+		email := strings.TrimSpace(row[1])
+		idRol := strings.TrimSpace(row[2])
+		status := strings.ToLower(strings.TrimSpace(row[3]))
 		if email != "" {
 			userMap[email] = struct{ IDRol, Status string }{IDRol: idRol, Status: status}
 		}
@@ -243,8 +262,8 @@ func (ha *HybridAuth) validatePermissionsWithServiceAccount(ctx context.Context,
 		if i == 0 || len(row) < 2 {
 			continue
 		}
-		idRol := strings.TrimSpace(fmt.Sprintf("%v", row[0]))
-		idPermiso := strings.TrimSpace(fmt.Sprintf("%v", row[1]))
+		idRol := strings.TrimSpace(row[0])
+		idPermiso := strings.TrimSpace(row[1])
 		if idRol != "" && idPermiso != "" {
 			rolePermsMap[idRol] = append(rolePermsMap[idRol], idPermiso)
 		}
@@ -255,19 +274,19 @@ func (ha *HybridAuth) validatePermissionsWithServiceAccount(ctx context.Context,
 		if i == 0 || len(row) < 2 {
 			continue
 		}
-		idPermiso := strings.TrimSpace(fmt.Sprintf("%v", row[0]))
-		nombrePermiso := strings.TrimSpace(fmt.Sprintf("%v", row[1]))
+		idPermiso := strings.TrimSpace(row[0])
+		nombrePermiso := strings.TrimSpace(row[1])
 		if idPermiso != "" {
 			permsMap[idPermiso] = nombrePermiso
 		}
 	}
 
+	// Validar
 	user, exists := userMap[userEmail]
 	if !exists {
 		return fmt.Errorf("el correo %s no está registrado en la hoja 'users'", userEmail)
 	}
-
-	if user.Status != "1" && user.Status != "active" {
+	if user.Status != "activo" && user.Status != "1" {
 		return fmt.Errorf("el usuario %s no está activo (estado: %s)", userEmail, user.Status)
 	}
 
@@ -279,7 +298,7 @@ func (ha *HybridAuth) validatePermissionsWithServiceAccount(ctx context.Context,
 	hasPermission := false
 	for _, idPermiso := range permisosDelRol {
 		if nombre, ok := permsMap[idPermiso]; ok {
-			if strings.EqualFold(nombre, ha.config.RequiredPermission) {
+			if strings.EqualFold(nombre, ua.config.RequiredPermission) {
 				hasPermission = true
 				break
 			}
@@ -287,18 +306,15 @@ func (ha *HybridAuth) validatePermissionsWithServiceAccount(ctx context.Context,
 	}
 
 	if !hasPermission {
-		return fmt.Errorf("el usuario %s (Rol: %s) no tiene el permiso: '%s'",
-			userEmail, user.IDRol, ha.config.RequiredPermission)
+		return fmt.Errorf("el usuario %s (Rol: %s) no tiene el permiso: '%s'", userEmail, user.IDRol, ua.config.RequiredPermission)
 	}
 
-	log.Comentario("SUCCESS", fmt.Sprintf("✅ Usuario %s validado correctamente con permiso '%s'",
-		userEmail, ha.config.RequiredPermission))
+	log.Comentario("SUCCESS", fmt.Sprintf("✅ Usuario %s validado correctamente con permiso '%s'", userEmail, ua.config.RequiredPermission))
 	return nil
 }
 
 // --- Funciones auxiliares ---
-
-func (ha *HybridAuth) tokenFromFile(file string) (*oauth2.Token, error) {
+func (ua *UserAuth) tokenFromFile(file string) (*oauth2.Token, error) {
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, err
@@ -309,7 +325,7 @@ func (ha *HybridAuth) tokenFromFile(file string) (*oauth2.Token, error) {
 	return token, err
 }
 
-func (ha *HybridAuth) saveToken(file string, token *oauth2.Token) error {
+func (ua *UserAuth) saveToken(file string, token *oauth2.Token) error {
 	f, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
@@ -318,7 +334,7 @@ func (ha *HybridAuth) saveToken(file string, token *oauth2.Token) error {
 	return json.NewEncoder(f).Encode(token)
 }
 
-func (ha *HybridAuth) openBrowser(url string) {
+func (ua *UserAuth) openBrowser(url string) {
 	var err error
 	switch runtime.GOOS {
 	case "linux":

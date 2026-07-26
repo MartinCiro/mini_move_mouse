@@ -14,9 +14,9 @@ type KeepAliveConfig struct {
 }
 
 type ConfigData struct {
-	KeepAlive KeepAliveConfig   `json:"keep_alive"`
-	LogPath   string            `json:"log_path,omitempty"`
-	Auth      *HybridAuthConfig `json:"auth,omitempty"`
+	KeepAlive KeepAliveConfig `json:"keep_alive"`
+	LogPath   string          `json:"log_path,omitempty"`
+	Auth      *AuthConfig     `json:"auth,omitempty"`
 }
 
 type Config struct {
@@ -84,12 +84,12 @@ func (c *Config) GetKeepAliveConfig() KeepAliveConfig {
 	return c.configData.KeepAlive
 }
 
-func (c *Config) GetHybridAuthConfig() HybridAuthConfig {
+func (c *Config) GetAuthConfig() AuthConfig {
 	c.configMu.Lock()
 	defer c.configMu.Unlock()
 
 	if c.configData.Auth == nil {
-		return HybridAuthConfig{}
+		return AuthConfig{}
 	}
 	return *c.configData.Auth
 }
