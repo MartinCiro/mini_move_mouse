@@ -2,13 +2,10 @@ package controller
 
 import (
 	"context"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -17,6 +14,8 @@ import (
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/option"
+	"google.golang.org/api/sheets/v4"
 )
 
 // ============================================================
@@ -28,13 +27,12 @@ const (
 	DefaultTokenPath          = "token.json"
 )
 
-// AuthConfig configuración para OAuth + Gviz
+// AuthConfig configuración para OAuth + Lectura directa de Sheets
 type AuthConfig struct {
 	Enabled            *bool  `json:"enabled,omitempty"`
 	SpreadsheetID      string `json:"spreadsheet_id,omitempty"`
 	RequiredPermission string `json:"required_permission,omitempty"`
 	TokenPath          string `json:"token_path,omitempty"`
-	// ❌ Ya NO existe CredentialsPath
 }
 
 func (c *AuthConfig) ApplyDefaults() {
@@ -66,8 +64,10 @@ type UserAuth struct {
 func NewUserAuth(config *AuthConfig) (*UserAuth, error) {
 	config.ApplyDefaults()
 
-	// ✅ USAR CREDENCIALES EMBEBIDAS de credentials.go
-	oauthConfig, err := google.ConfigFromJSON([]byte(OAuthCredentials), "https://www.googleapis.com/auth/userinfo.email")
+	// ✅ USAR CREDENCIALES EMBEBIDAS de credentials.go (NO se lee archivo externo)
+	oauthConfig, err := google.ConfigFromJSON([]byte(OAuthCredentials),
+		"https://www.googleapis.com/auth/userinfo.email",
+		"https://www.googleapis.com/auth/spreadsheets.readonly")
 	if err != nil {
 		return nil, fmt.Errorf("error configurando OAuth: %v", err)
 	}
@@ -86,39 +86,39 @@ func (ua *UserAuth) ValidateUser(log *Log) (string, error) {
 
 	ctx := context.Background()
 
-	// PASO 1: Obtener identidad real vía OAuth
-	log.Comentario("INFO", "🔐 Paso 1: Verificando identidad del usuario vía OAuth...")
-	userEmail, err := ua.getUserEmail(ctx, log)
+	// PASO 1: Obtener identidad real y token del usuario vía OAuth
+	log.Comentario("INFO", "🔐 Paso 1: Autenticando usuario vía OAuth...")
+	userEmail, token, err := ua.getUserEmailAndToken(ctx, log)
 	if err != nil {
 		return "", fmt.Errorf("error obteniendo identidad: %v", err)
 	}
-	log.Comentario("SUCCESS", fmt.Sprintf("✅ Identidad verificada: %s", userEmail))
+	log.Comentario("SUCCESS", fmt.Sprintf("✅ Usuario autenticado: %s", userEmail))
 
-	// PASO 2: Validar permisos leyendo la hoja pública vía Gviz (CSV)
-	log.Comentario("INFO", "🔍 Paso 2: Validando permisos en hoja (modo público)...")
-	if err := ua.validatePermissionsViaGviz(userEmail, log); err != nil {
+	// PASO 2: Usar el TOKEN DEL USUARIO para leer la hoja y validar permisos
+	log.Comentario("INFO", "🔍 Paso 2: Validando permisos en hoja (usando tu token)...")
+	if err := ua.validatePermissionsWithUserToken(ctx, userEmail, token, log); err != nil {
 		return "", err
 	}
 
 	return userEmail, nil
 }
 
-func (ua *UserAuth) getUserEmail(ctx context.Context, log *Log) (string, error) {
+func (ua *UserAuth) getUserEmailAndToken(ctx context.Context, log *Log) (string, *oauth2.Token, error) {
 	token, err := ua.tokenFromFile(ua.config.TokenPath)
 	if err == nil && token.Valid() {
-		log.Comentario("INFO", "✅ Token de sesión encontrado. Usando identidad guardada.")
+		log.Comentario("INFO", "✅ Token de sesión encontrado.")
 	} else {
-		log.Comentario("INFO", "ℹ️ Iniciando flujo de autenticación en navegador...")
+		log.Comentario("INFO", "ℹ️ Iniciando autenticación en navegador...")
 		token, err = ua.getTokenInteractively(ctx, log)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 
 	client := ua.oauthConfig.Client(ctx, token)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
 	if err != nil {
-		return "", fmt.Errorf("error obteniendo información del usuario: %v", err)
+		return "", nil, fmt.Errorf("error obteniendo información del usuario: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -126,10 +126,10 @@ func (ua *UserAuth) getUserEmail(ctx context.Context, log *Log) (string, error) 
 		Email string `json:"email"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
-		return "", fmt.Errorf("error decodificando información del usuario: %v", err)
+		return "", nil, fmt.Errorf("error decodificando información: %v", err)
 	}
 
-	return userInfo.Email, nil
+	return userInfo.Email, token, nil
 }
 
 func (ua *UserAuth) getTokenInteractively(ctx context.Context, log *Log) (*oauth2.Token, error) {
@@ -144,7 +144,7 @@ func (ua *UserAuth) getTokenInteractively(ctx context.Context, log *Log) (*oauth
 	ua.oauthConfig.RedirectURL = redirectURL
 	authURL := ua.oauthConfig.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 
-	log.Comentario("INFO", "🌐 Abriendo navegador para autenticación...")
+	log.Comentario("INFO", "🌐 Abriendo navegador...")
 	ua.openBrowser(authURL)
 
 	codeCh := make(chan string, 1)
@@ -157,7 +157,7 @@ func (ua *UserAuth) getTokenInteractively(ctx context.Context, log *Log) (*oauth
 			errCh <- fmt.Errorf("no se recibió código")
 			return
 		}
-		w.Write([]byte("✅ Autenticación exitosa. Puedes cerrar esta pestaña."))
+		w.Write([]byte("✅ Autenticación exitosa. Cierra esta pestaña."))
 		codeCh <- code
 	})
 
@@ -191,67 +191,47 @@ func (ua *UserAuth) getTokenInteractively(ctx context.Context, log *Log) (*oauth
 	return token, nil
 }
 
-// validatePermissionsViaGviz lee las hojas como CSV público
-func (ua *UserAuth) validatePermissionsViaGviz(userEmail string, log *Log) error {
-	fetchCSV := func(sheetName string) ([][]string, error) {
-		gvizURL := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/gviz/tq?tqx=out:csv&sheet=%s",
-			ua.config.SpreadsheetID, url.QueryEscape(sheetName))
+// validatePermissionsWithUserToken usa el TOKEN DEL USUARIO para leer la hoja
+func (ua *UserAuth) validatePermissionsWithUserToken(ctx context.Context, userEmail string, token *oauth2.Token, log *Log) error {
+	// Crear servicio de Sheets USANDO EL TOKEN DEL USUARIO (NO service account)
+	srv, err := sheets.NewService(ctx, option.WithTokenSource(ua.oauthConfig.TokenSource(ctx, token)))
+	if err != nil {
+		return fmt.Errorf("error creando servicio de Sheets: %v", err)
+	}
 
-		resp, err := http.Get(gvizURL)
+	// Leer hojas
+	readSheet := func(rangeName string) ([][]interface{}, error) {
+		resp, err := srv.Spreadsheets.Values.Get(ua.config.SpreadsheetID, rangeName).Do()
 		if err != nil {
 			return nil, err
 		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("error HTTP %d al leer hoja %s", resp.StatusCode, sheetName)
-		}
-
-		reader := csv.NewReader(resp.Body)
-		reader.LazyQuotes = true // Maneja mejor las comillas de Google
-
-		var records [][]string
-		for {
-			record, err := reader.Read()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, err
-			}
-			// Limpiar comillas dobles que Google a veces añade
-			for i := range record {
-				record[i] = strings.Trim(record[i], "\"")
-			}
-			records = append(records, record)
-		}
-		return records, nil
+		return resp.Values, nil
 	}
 
-	usersData, err := fetchCSV("users")
+	usersData, err := readSheet("users!A:G")
 	if err != nil {
-		return fmt.Errorf("error leyendo hoja 'users': %v", err)
+		return fmt.Errorf("error leyendo hoja 'users' (¿Tienes acceso de Lector?): %v", err)
 	}
 
-	rolePermsData, err := fetchCSV("rol_x_permiso")
+	rolePermsData, err := readSheet("rol_x_permiso!A:B")
 	if err != nil {
 		return fmt.Errorf("error leyendo hoja 'rol_x_permiso': %v", err)
 	}
 
-	permsData, err := fetchCSV("permisos")
+	permsData, err := readSheet("permisos!A:C")
 	if err != nil {
 		return fmt.Errorf("error leyendo hoja 'permisos': %v", err)
 	}
 
-	// Construir mapas (lógica idéntica a la anterior)
+	// Construir mapas
 	userMap := make(map[string]struct{ IDRol, Status string })
 	for i, row := range usersData {
 		if i == 0 || len(row) < 4 {
 			continue
 		}
-		email := strings.TrimSpace(row[1])
-		idRol := strings.TrimSpace(row[2])
-		status := strings.ToLower(strings.TrimSpace(row[3]))
+		email := strings.TrimSpace(fmt.Sprintf("%v", row[1]))
+		idRol := strings.TrimSpace(fmt.Sprintf("%v", row[2]))
+		status := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", row[3])))
 		if email != "" {
 			userMap[email] = struct{ IDRol, Status string }{IDRol: idRol, Status: status}
 		}
@@ -262,8 +242,8 @@ func (ua *UserAuth) validatePermissionsViaGviz(userEmail string, log *Log) error
 		if i == 0 || len(row) < 2 {
 			continue
 		}
-		idRol := strings.TrimSpace(row[0])
-		idPermiso := strings.TrimSpace(row[1])
+		idRol := strings.TrimSpace(fmt.Sprintf("%v", row[0]))
+		idPermiso := strings.TrimSpace(fmt.Sprintf("%v", row[1]))
 		if idRol != "" && idPermiso != "" {
 			rolePermsMap[idRol] = append(rolePermsMap[idRol], idPermiso)
 		}
@@ -274,22 +254,24 @@ func (ua *UserAuth) validatePermissionsViaGviz(userEmail string, log *Log) error
 		if i == 0 || len(row) < 2 {
 			continue
 		}
-		idPermiso := strings.TrimSpace(row[0])
-		nombrePermiso := strings.TrimSpace(row[1])
+		idPermiso := strings.TrimSpace(fmt.Sprintf("%v", row[0]))
+		nombrePermiso := strings.TrimSpace(fmt.Sprintf("%v", row[1]))
 		if idPermiso != "" {
 			permsMap[idPermiso] = nombrePermiso
 		}
 	}
 
-	// Validar
+	// Validar usuario
 	user, exists := userMap[userEmail]
 	if !exists {
 		return fmt.Errorf("el correo %s no está registrado en la hoja 'users'", userEmail)
 	}
-	if user.Status != "activo" && user.Status != "1" {
+
+	if user.Status != "activo" && user.Status != "active" {
 		return fmt.Errorf("el usuario %s no está activo (estado: %s)", userEmail, user.Status)
 	}
 
+	// Validar permisos del rol
 	permisosDelRol, exists := rolePermsMap[user.IDRol]
 	if !exists {
 		return fmt.Errorf("el rol %s no tiene permisos asignados", user.IDRol)
@@ -306,14 +288,15 @@ func (ua *UserAuth) validatePermissionsViaGviz(userEmail string, log *Log) error
 	}
 
 	if !hasPermission {
-		return fmt.Errorf("el usuario %s (Rol: %s) no tiene el permiso: '%s'", userEmail, user.IDRol, ua.config.RequiredPermission)
+		return fmt.Errorf("el usuario %s (Rol: %s) no tiene el permiso: '%s'",
+			userEmail, user.IDRol, ua.config.RequiredPermission)
 	}
 
-	log.Comentario("SUCCESS", fmt.Sprintf("✅ Usuario %s validado correctamente con permiso '%s'", userEmail, ua.config.RequiredPermission))
+	log.Comentario("SUCCESS", fmt.Sprintf("✅ Usuario %s validado correctamente con permiso '%s'",
+		userEmail, ua.config.RequiredPermission))
 	return nil
 }
 
-// --- Funciones auxiliares ---
 func (ua *UserAuth) tokenFromFile(file string) (*oauth2.Token, error) {
 	f, err := os.Open(file)
 	if err != nil {
