@@ -14,9 +14,9 @@ const (
 	logFormatoTiempo = "2006-01-02 15:04:05"
 )
 
-// Log sistema de logging con escritura thread-safe
+// Log sistema de logging con escritura thread-safe y creación perezosa (lazy)
 type Log struct {
-	rutaBase        string
+	basePath        string
 	rutaProcesos    string
 	rutaErrores     string
 	archivoProcesos string
@@ -25,44 +25,38 @@ type Log struct {
 }
 
 // NewLog crea una nueva instancia de Log.
-// Si basePath está vacío, usa el directorio temporal del sistema (%TEMP%).
+// Elimina los logs anteriores al iniciar y crea las carpetas solo cuando se van a usar.
 func NewLog(basePath string) *Log {
 	if basePath == "" {
 		basePath = os.TempDir()
 	}
 
-	fechaActual := time.Now().Format("2006-01-02")
-	rutaProcesos := filepath.Join(basePath, "logs", "procesos")
-	rutaErrores := filepath.Join(basePath, "logs", "errores")
+	rutaLogs := filepath.Join(basePath, "logs")
 
-	// 1. Intentar crear en la ruta solicitada (%TEMP%)
-	errProc := os.MkdirAll(rutaProcesos, 0755)
-	errErr := os.MkdirAll(rutaErrores, 0755)
+	// 1. ELIMINAR LOGS ANTERIORES AL INICIAR
+	// Eliminamos la carpeta 'logs' completa dentro del basePath para empezar limpio
+	err := os.RemoveAll(rutaLogs)
 
-	// 2. FALLBACK: Si falla (por permisos o ruta inválida), usar la carpeta del ejecutable
-	if errProc != nil || errErr != nil {
+	// 2. FALLBACK: Si falla (por permisos en %TEMP%), usar la carpeta del ejecutable
+	if err != nil {
 		exeDir, _ := os.Executable()
 		basePath = filepath.Dir(exeDir)
-		rutaProcesos = filepath.Join(basePath, "logs", "procesos")
-		rutaErrores = filepath.Join(basePath, "logs", "errores")
+		rutaLogs = filepath.Join(basePath, "logs")
 
-		// Intentar de nuevo en la carpeta del ejecutable
-		_ = os.MkdirAll(rutaProcesos, 0755)
-		_ = os.MkdirAll(rutaErrores, 0755)
+		// Intentar eliminar también en la carpeta fallback por si acaso
+		_ = os.RemoveAll(rutaLogs)
 	}
 
-	archivoProcesos := filepath.Join(rutaProcesos, fmt.Sprintf("LogProcesos_%s.txt", fechaActual))
-	archivoErrores := filepath.Join(rutaErrores, fmt.Sprintf("LogErrores_%s.txt", fechaActual))
+	fechaActual := time.Now().Format("2006-01-02")
 
 	l := &Log{
-		rutaBase:        basePath,
-		rutaProcesos:    rutaProcesos,
-		rutaErrores:     rutaErrores,
-		archivoProcesos: archivoProcesos,
-		archivoErrores:  archivoErrores,
+		basePath:        basePath,
+		rutaProcesos:    filepath.Join(basePath, "logs", "procesos"),
+		rutaErrores:     filepath.Join(basePath, "logs", "errores"),
+		archivoProcesos: filepath.Join(basePath, "logs", "procesos", fmt.Sprintf("LogProcesos_%s.txt", fechaActual)),
+		archivoErrores:  filepath.Join(basePath, "logs", "errores", fmt.Sprintf("LogErrores_%s.txt", fechaActual)),
 	}
 
-	go l.cleanupOldLogs()
 	return l
 }
 
@@ -85,9 +79,19 @@ func (l *Log) formatearMensaje(lineas ...string) string {
 	return sb.String()
 }
 
-func (l *Log) escribirLog(archivo string, mensaje string) {
+// asegurarCarpeta crea la carpeta de forma perezosa (lazy) solo si no existe
+func (l *Log) asegurarCarpeta(rutaCarpeta string) {
+	if _, err := os.Stat(rutaCarpeta); os.IsNotExist(err) {
+		_ = os.MkdirAll(rutaCarpeta, 0755)
+	}
+}
+
+func (l *Log) escribirLog(archivo string, rutaCarpeta string, mensaje string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// 🧹 CREACIÓN PEREZOSA: Solo creamos la carpeta en el momento exacto de escribir
+	l.asegurarCarpeta(rutaCarpeta)
 
 	f, err := os.OpenFile(archivo, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -108,7 +112,7 @@ func (l *Log) InicioProceso(nombreAplicacion ...string) {
 	mensaje := l.formatearMensaje(
 		fmt.Sprintf("INICIO DE EJECUCIÓN - %s - %s", nombre, l.tiempoActual()),
 	)
-	l.escribirLog(l.archivoProcesos, mensaje)
+	l.escribirLog(l.archivoProcesos, l.rutaProcesos, mensaje)
 }
 
 func (l *Log) FinProceso(nombreAplicacion ...string) {
@@ -119,12 +123,12 @@ func (l *Log) FinProceso(nombreAplicacion ...string) {
 	mensaje := l.formatearMensaje(
 		fmt.Sprintf("FIN DE EJECUCIÓN - %s - %s", nombre, l.tiempoActual()),
 	)
-	l.escribirLog(l.archivoProcesos, mensaje)
+	l.escribirLog(l.archivoProcesos, l.rutaProcesos, mensaje)
 }
 
 func (l *Log) Proceso(nombreProceso string) {
 	mensaje := fmt.Sprintf("| Ejecutando: %-80s | Hora: %s |", nombreProceso, l.tiempoActual())
-	l.escribirLog(l.archivoProcesos, mensaje)
+	l.escribirLog(l.archivoProcesos, l.rutaProcesos, mensaje)
 }
 
 func (l *Log) Comentario(nivel string, mensaje string) {
@@ -132,7 +136,7 @@ func (l *Log) Comentario(nivel string, mensaje string) {
 		fmt.Sprintf("%s: %s", strings.ToUpper(nivel), mensaje),
 		fmt.Sprintf("Hora: %s", l.tiempoActual()),
 	)
-	l.escribirLog(l.archivoProcesos, contenido)
+	l.escribirLog(l.archivoProcesos, l.rutaProcesos, contenido)
 }
 
 func (l *Log) Error(descripcionError string, proceso ...string) {
@@ -146,34 +150,14 @@ func (l *Log) Error(descripcionError string, proceso ...string) {
 		nombreProceso,
 		fmt.Sprintf("Detalle: %s", descripcionError),
 	)
-	l.escribirLog(l.archivoErrores, contenido)
-	l.escribirLog(l.archivoProcesos, contenido)
+
+	// Escribe en errores (aquí se creará la carpeta 'errores' por primera y única vez si hay errores)
+	l.escribirLog(l.archivoErrores, l.rutaErrores, contenido)
+
+	// También lo refleja en procesos
+	l.escribirLog(l.archivoProcesos, l.rutaProcesos, contenido)
 }
 
 func (l *Log) Separador() {
-	l.escribirLog(l.archivoProcesos, strings.Repeat("=", logAncho))
-}
-
-func (l *Log) cleanupOldLogs() {
-	cutoff := time.Now().AddDate(0, 0, -7)
-
-	_ = filepath.Walk(l.rutaProcesos, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(path)
-		}
-		return nil
-	})
-
-	_ = filepath.Walk(l.rutaErrores, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(path)
-		}
-		return nil
-	})
+	l.escribirLog(l.archivoProcesos, l.rutaProcesos, strings.Repeat("=", logAncho))
 }
