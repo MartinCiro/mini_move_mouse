@@ -22,7 +22,7 @@ import (
 // VALORES POR DEFECTO (Hardcodeados por el Administrador)
 // ============================================================
 const (
-	DefaultSpreadsheetID      = "18lifTzZUTmIgDXWEwH8XeGx1_yXi3HwgJP1_l25Wb4Y"
+	DefaultSpreadsheetID      = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" // Reemplaza con tu ID de hoja de cálculo
 	DefaultRequiredPermission = "ejx:mm"
 	DefaultTokenPath          = "token.json"
 )
@@ -267,7 +267,7 @@ func (ua *UserAuth) validatePermissionsWithUserToken(ctx context.Context, userEm
 		return fmt.Errorf("el correo %s no está registrado en la hoja 'users'", userEmail)
 	}
 
-	if user.Status != "activo" && user.Status != "active" {
+	if user.Status != "activo" && user.Status != "1" {
 		return fmt.Errorf("el usuario %s no está activo (estado: %s)", userEmail, user.Status)
 	}
 
